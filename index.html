@@ -155,6 +155,24 @@
     }
 
     /* ═══════════════════════════════════════════════════════
+       PKCE HELPERS (OAuth 2.0 Authorization Code + PKCE)
+    ═══════════════════════════════════════════════════════ */
+    function generateCodeVerifier() {
+      const array = new Uint8Array(32);
+      crypto.getRandomValues(array);
+      return btoa(Array.from(array, b => String.fromCharCode(b)).join(''))
+        .replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
+    }
+
+    async function generateCodeChallenge(verifier) {
+      const encoder = new TextEncoder();
+      const data = encoder.encode(verifier);
+      const digest = await crypto.subtle.digest('SHA-256', data);
+      return btoa(Array.from(new Uint8Array(digest), b => String.fromCharCode(b)).join(''))
+        .replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
+    }
+
+    /* ═══════════════════════════════════════════════════════
        STATE MANAGEMENT
     ═══════════════════════════════════════════════════════ */
     const defaultState = {
@@ -300,10 +318,30 @@
         document.title = state.pageTitle || 'La Ganga – Dashboard';
       }, [state.pageTitle]);
 
-      // Handle OAuth2 callback: read access_token from URL hash on load.
-      // If loaded inside a popup (window.opener present), save the token to
-      // localStorage, notify the parent via postMessage, and close the popup.
+      // Handle OAuth2 callback: supports both PKCE (code in query params) and
+      // legacy implicit grant (token in URL hash).
+      // If loaded inside a popup (window.opener present), notify the parent
+      // via postMessage and close the popup.
       useEffect(() => {
+        // PKCE flow: authorization code returned as ?code=XXX&state=YYY
+        const searchParams = new URLSearchParams(window.location.search);
+        const code = searchParams.get('code');
+        const stateParam = searchParams.get('state');
+        if (code) {
+          history.replaceState(null, '', window.location.pathname);
+          if (window.opener && !window.opener.closed) {
+            try {
+              window.opener.postMessage(
+                { type: 'kick_oauth_code', code, state: stateParam },
+                window.location.origin
+              );
+            } catch {}
+            window.close();
+            return;
+          }
+        }
+
+        // Legacy implicit grant: access_token returned in URL hash
         const hash = window.location.hash;
         if (!hash) return;
         const params = new URLSearchParams(hash.slice(1));
@@ -313,7 +351,6 @@
           const expiry = expiresIn > 0 ? Date.now() + expiresIn * 1000 : 0;
           localStorage.setItem('kick_token', token);
           history.replaceState(null, '', window.location.pathname + window.location.search);
-          // Popup flow: notify opener and close this window
           if (window.opener && !window.opener.closed) {
             try {
               window.opener.postMessage(
@@ -324,17 +361,67 @@
             window.close();
             return;
           }
-          // Redirect flow (fallback): update state directly
           setState(s => ({ ...s, kickAccessToken: token, kickTokenExpiry: expiry }));
           setTimeout(() => showToast('✅ Conectado a Kick con OAuth2'), 100);
         }
       // eslint-disable-next-line react-hooks/exhaustive-deps
       }, []);
 
-      // Listen for the token message sent by the OAuth popup
+      // Listen for the OAuth message sent by the popup.
+      // Handles both PKCE code exchange and legacy implicit-grant token.
       useEffect(() => {
-        function onMessage(e) {
+        async function onMessage(e) {
           if (e.origin !== window.location.origin) return;
+
+          // PKCE flow: popup sends us the authorization code
+          if (e.data && e.data.type === 'kick_oauth_code') {
+            const { code, state: returnedState } = e.data;
+            const savedState   = sessionStorage.getItem('oauth_state');
+            const verifier     = sessionStorage.getItem('pkce_verifier');
+            sessionStorage.removeItem('pkce_verifier');
+            sessionStorage.removeItem('oauth_state');
+
+            if (savedState && returnedState !== savedState) {
+              showToast('⚠️ Error de seguridad OAuth (state mismatch)', '#ef4444');
+              return;
+            }
+            if (!verifier || !code) {
+              showToast('⚠️ Error en flujo OAuth: faltan parámetros', '#ef4444');
+              return;
+            }
+            try {
+              const redirectUri = window.location.origin + window.location.pathname;
+              const body = new URLSearchParams({
+                grant_type:    'authorization_code',
+                code,
+                client_id:     KICK_CLIENT_ID,
+                code_verifier: verifier,
+                redirect_uri:  redirectUri,
+              });
+              const res = await fetch('https://id.kick.com/oauth/token', {
+                method:  'POST',
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                body:    body.toString(),
+              });
+              if (!res.ok) {
+                const err = await res.json().catch(() => ({ error: 'Unknown error' }));
+                showToast(`⚠️ Error OAuth: ${err.error_description || err.error || res.status}`, '#ef4444');
+                return;
+              }
+              const data      = await res.json();
+              const token     = data.access_token;
+              const expiresIn = data.expires_in || 0;
+              const expiry    = expiresIn > 0 ? Date.now() + expiresIn * 1000 : 0;
+              localStorage.setItem('kick_token', token);
+              setState(s => ({ ...s, kickAccessToken: token, kickTokenExpiry: expiry }));
+              showToast('✅ Conectado a Kick con OAuth2');
+            } catch {
+              showToast('⚠️ Error de red al obtener token OAuth', '#ef4444');
+            }
+            return;
+          }
+
+          // Legacy implicit-grant flow: popup sends the access token directly
           if (e.data && e.data.type === 'kick_oauth_token') {
             const { token, expiry } = e.data;
             setState(s => ({ ...s, kickAccessToken: token, kickTokenExpiry: expiry || 0 }));
@@ -494,12 +581,28 @@
         } catch { showToast('Error de red al probar webhook', '#ef4444'); }
       }
 
-      function initiateKickOAuth() {
-        const redirectUri = encodeURIComponent(window.location.origin + window.location.pathname);
-        const url = `https://id.kick.com/oauth/authorize?response_type=token&client_id=${KICK_CLIENT_ID}&redirect_uri=${redirectUri}&scope=user:read%20chat:write`;
-        const popup = window.open(url, 'kick_oauth', 'width=520,height=680,scrollbars=yes,resizable=yes');
-        if (!popup) {
-          showToast('⚠️ Pop-up bloqueado. Habilítalo en tu navegador.', '#ef4444');
+      async function initiateKickOAuth() {
+        try {
+          const codeVerifier  = generateCodeVerifier();
+          const codeChallenge = await generateCodeChallenge(codeVerifier);
+          const oauthState    = generateCodeVerifier(); // random state for CSRF protection
+          sessionStorage.setItem('pkce_verifier', codeVerifier);
+          sessionStorage.setItem('oauth_state',   oauthState);
+          const redirectUri = encodeURIComponent(window.location.origin + window.location.pathname);
+          const url = `https://id.kick.com/oauth/authorize`
+            + `?response_type=code`
+            + `&client_id=${KICK_CLIENT_ID}`
+            + `&redirect_uri=${redirectUri}`
+            + `&scope=user:read%20chat:write`
+            + `&state=${oauthState}`
+            + `&code_challenge=${codeChallenge}`
+            + `&code_challenge_method=S256`;
+          const popup = window.open(url, 'kick_oauth', 'width=520,height=680,scrollbars=yes,resizable=yes');
+          if (!popup) {
+            showToast('⚠️ Pop-up bloqueado. Habilítalo en tu navegador.', '#ef4444');
+          }
+        } catch {
+          showToast('⚠️ Error al iniciar OAuth', '#ef4444');
         }
       }
 
@@ -701,7 +804,7 @@
     function Header() {
       const { state, toggleStream, clearStreams, openChat, sidebarOpen, setSidebarOpen,
               setShowDiscord, setShowAdmin, refreshStatuses, apiLoading,
-              muteAll, toggleMuteAll } = useApp();
+              muteAll, toggleMuteAll, cinemaIds, enterCinema, exitCinema } = useApp();
       const [customInput, setCustomInput] = useState('');
       const isMobile = useIsMobile();
 
@@ -792,6 +895,21 @@
             >
               <span style={{ fontSize:16 }}>{muteAll ? '🔇' : '🔊'}</span>
             </button>
+            {state.active.length > 0 && (
+              <button
+                style={{ ...S.iconBtn(cinemaIds.length > 0), color: cinemaIds.length > 0 ? 'var(--neon)' : 'var(--muted2)' }}
+                onClick={() => {
+                  if (cinemaIds.length > 0) {
+                    exitCinema();
+                  } else {
+                    state.active.forEach(id => enterCinema(id));
+                  }
+                }}
+                title={cinemaIds.length > 0 ? 'Salir del Modo Cine' : 'Modo Cine'}
+              >
+                <span style={{ fontSize:16 }}>🎬</span>
+              </button>
+            )}
             <button style={S.iconBtn(false)} onClick={() => openChat()} title="Chat">
               <Icon.Chat />
             </button>
@@ -942,7 +1060,7 @@
        STREAM CELL
     ═══════════════════════════════════════════════════════ */
     function StreamCell({ channelId }) {
-      const { state, removeStream, toggleCinema, cinemaIds, statusMap, showToast, muteAll } = useApp();
+      const { state, removeStream, cinemaIds, statusMap, showToast, muteAll } = useApp();
       const [hovered, setHovered] = useState(false);
       const iframeRef = useRef(null);
       const prevOnlineRef = useRef(null);
@@ -1031,19 +1149,6 @@
               opacity: hovered ? 1 : 0, transition:'opacity .15s', zIndex:2,
             }}>
               <button
-                onClick={() => toggleCinema(channelId)}
-                style={{
-                  fontSize:11, padding:'3px 7px', borderRadius:5,
-                  color: isCinema ? 'var(--neon)' : 'var(--white)',
-                  background: isCinema ? 'rgba(83,252,24,.2)' : 'none',
-                  border:`1px solid ${isCinema ? 'rgba(83,252,24,.4)' : 'rgba(255,255,255,.2)'}`,
-                  cursor:'pointer',
-                }}
-                title={isCinema ? 'Salir del Modo Cine' : 'Modo Cine'}
-              >
-                {isCinema ? '⊡ Normal' : '🎬 Cine'}
-              </button>
-              <button
                 onClick={() => removeStream(channelId)}
                 style={{
                   fontSize:11, padding:'3px 7px', borderRadius:5, color:'var(--white)',
@@ -1127,7 +1232,7 @@
        DASHBOARD STATS CARD
     ═══════════════════════════════════════════════════════ */
     function StatsCard({ streamer }) {
-      const { state, toggleStream, toggleCinema, cinemaIds, statusMap } = useApp();
+      const { state, toggleStream, statusMap } = useApp();
       const on   = state.active.includes(streamer.id);
       const st   = statusMap[streamer.id];
       const live = st && st.online;
@@ -1221,17 +1326,6 @@
             >
               {on ? '✕ Quitar' : '▶ Ver'}
             </button>
-            <button
-              onClick={() => toggleCinema(streamer.id)}
-              style={{
-                width:30, fontSize:13,
-                border:`1px solid ${cinemaIds.includes(streamer.id) ? 'rgba(83,252,24,.4)' : 'var(--border)'}`,
-                borderRadius:6, cursor:'pointer',
-                background: cinemaIds.includes(streamer.id) ? 'rgba(83,252,24,.12)' : 'none',
-                color: cinemaIds.includes(streamer.id) ? 'var(--neon)' : 'inherit',
-              }}
-              title={cinemaIds.includes(streamer.id) ? 'Salir del Modo Cine' : 'Modo Cine'}
-            >🎬</button>
             <a
               href={KICK_LINK(streamer.id)}
               target="_blank" rel="noreferrer"
@@ -1291,6 +1385,17 @@
                   Chat
                 </span>
                 <div style={{ display:'flex', alignItems:'center', gap:6 }}>
+                  <a
+                    href="https://kick.com/login"
+                    target="_blank"
+                    rel="noreferrer"
+                    style={{
+                      fontSize:10, fontWeight:700, padding:'2px 7px', borderRadius:4,
+                      background:'rgba(83,252,24,.1)', border:'1px solid rgba(83,252,24,.3)',
+                      color:'var(--neon)', textDecoration:'none', flexShrink:0,
+                    }}
+                    title="Inicia sesión en Kick para poder chatear (se abre en nueva pestaña)"
+                  >🔑 Login</a>
                   <select
                     value={chatChannel}
                     onChange={e => setChatChannel(e.target.value)}
