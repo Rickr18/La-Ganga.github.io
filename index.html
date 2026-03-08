@@ -4,6 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>La Ganga – Multi-Stream Dashboard</title>
+  <link rel="icon" href="https://cdn.brandfetch.io/id3gkQXO6j/w/400/h/400/theme/dark/icon.jpeg?c=1bxid64Mup7aczewSAYMX&t=1752548681236" type="image/jpeg" />
   <!-- React 18 -->
   <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
   <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
@@ -67,7 +68,7 @@
     const KICK_CHAT   = id => `https://kick.com/${id}/chatroom`;
     const KICK_LINK   = id => `https://kick.com/${id}`;
     // Height (px) of Kick's chat input bar; cropped via overflow:hidden to make chat read-only
-    const KICK_CHAT_INPUT_HEIGHT = 72;
+    const KICK_CHAT_INPUT_HEIGHT = 120;
 
     // Leandro = La Sapa. Su canal en Kick es "lasapaaaaa"
     const DEFAULT_STREAMERS = [
@@ -197,11 +198,9 @@
     }
 
     /* ═══════════════════════════════════════════════════════
-       KICK API – real live status (oficial v2 + fallback v1)
+       KICK API – real live status (oficial v1)
     ═══════════════════════════════════════════════════════ */
-    // Official Kick API v2 endpoint
-    const KICK_API_V2 = slug => `https://api.kick.com/public/v1/channels?broadcaster_user_login=${slug}`;
-    // Fallback: public unofficial v1 endpoint
+    // Official Kick API v1 endpoint
     const KICK_API_V1 = slug => `https://kick.com/api/v1/channels/${slug}`;
 
     function formatUptime(createdAt) {
@@ -215,28 +214,7 @@
     }
 
     async function fetchStreamData(channelName) {
-      // Try official API v2 first (public endpoint, no token required)
-      try {
-        const res = await fetch(KICK_API_V2(channelName), { headers: { Accept: 'application/json' }, cache: 'no-store' });
-        if (res.ok) {
-          const data = await res.json();
-          // v2 returns { data: [ channelObject ] }
-          const ch = data && Array.isArray(data.data) && data.data[0];
-          if (ch) {
-            const ls = ch.livestream || ch.stream || null;
-            return {
-              online:    ls != null && (ls.is_live !== false),
-              viewers:   (ls && (ls.viewer_count || ls.viewers)) || 0,
-              category:  (ls && ls.category && ls.category.name) || (ch.category && ch.category.name) || '',
-              title:     (ls && (ls.session_title || ls.title)) || '',
-              uptime:    ls ? formatUptime(ls.created_at || ls.started_at) : '',
-              error:     false,
-            };
-          }
-        }
-      } catch {}
-
-      // Fallback to unofficial v1
+      // Official Kick API v1
       try {
         const res = await fetch(KICK_API_V1(channelName), {
           headers: { Accept: 'application/json' },
@@ -612,7 +590,7 @@
 
       async function run() {
         setRunning(true);
-        const ms = await measurePing('https://kick.com/img/kick-logo.svg');
+        const ms = await measurePing('https://kick.com');
         setPing(ms === null ? 'N/A' : `${ms}ms`);
         setColor(pingColor(ms));
         setRunning(false);
@@ -767,7 +745,7 @@
             padding:'10px 14px', borderBottom:'1px solid var(--border)', flexShrink:0,
           }}>
             <div style={{ display:'flex', alignItems:'center', gap:6 }}>
-              <img src="https://kick.com/img/kick-logo.svg" alt="Kick" style={{ height:16, width:'auto', filter:'brightness(0) invert(1)' }} />
+              <img src="https://cdn.brandfetch.io/id3gkQXO6j/w/400/h/400/theme/dark/icon.jpeg?c=1bxid64Mup7aczewSAYMX&t=1752548681236" alt="Kick" style={{ width:18, height:18, borderRadius:4, objectFit:'cover', flexShrink:0 }} />
               <div style={{ fontSize:11, fontWeight:700, color:'var(--muted)', textTransform:'uppercase', letterSpacing:'.1em' }}>
                 Streamers
               </div>
@@ -1170,6 +1148,7 @@
                   style={{ position:'absolute', top:0, left:0, width:'100%', height:`calc(100% + ${KICK_CHAT_INPUT_HEIGHT}px)`, border:'none' }}
                   title="Kick Chat"
                 />
+                <div style={{ position:'absolute', bottom:0, left:0, right:0, height:KICK_CHAT_INPUT_HEIGHT, background:'var(--black)', zIndex:1, pointerEvents:'none' }} />
               </div>
             </>
           )}
@@ -1302,6 +1281,7 @@
                   style={{ position:'absolute', top:0, left:0, width:'100%', height:`calc(100% + ${KICK_CHAT_INPUT_HEIGHT}px)`, border:'none' }}
                   title="Chat modo cine"
                 />
+                <div style={{ position:'absolute', bottom:0, left:0, right:0, height:KICK_CHAT_INPUT_HEIGHT, background:'var(--black)', zIndex:1, pointerEvents:'none' }} />
               </div>
             </div>
           )}
@@ -1579,13 +1559,12 @@
                 <section style={sectionStyle}>
                   <h2 style={h2Style}>🔗 Estado en tiempo real</h2>
                   <p style={pStyle}>
-                    El estado en vivo se obtiene de la API pública oficial de Kick v2 con fallback a la API pública v1.
+                    El estado en vivo se obtiene de la API pública oficial de Kick v1.
                     Se actualiza cada 45 segundos.
                   </p>
                   <div style={{ background:'rgba(83,252,24,.06)', border:'1px solid rgba(83,252,24,.15)',
                     borderRadius:8, padding:'12px 16px', fontSize:12, fontFamily:'monospace', lineHeight:1.9, color:'var(--muted2)' }}>
-                    <div><span style={{color:'var(--muted)'}}>GET (v2 oficial)</span> <span style={{color:'var(--neon)'}}>https://api.kick.com/public/v1/channels?broadcaster_user_login=<span style={{color:'var(--yellow)'}}>slug</span></span></div>
-                    <div style={{marginTop:4}}><span style={{color:'var(--muted)'}}>GET (v1 fallback)</span> <span style={{color:'var(--muted2)'}}>https://kick.com/api/v1/channels/<span style={{color:'var(--yellow)'}}>slug</span></span></div>
+                    <div><span style={{color:'var(--muted)'}}>GET (v1 oficial)</span> <span style={{color:'var(--neon)'}}>https://kick.com/api/v1/channels/<span style={{color:'var(--yellow)'}}>slug</span></span></div>
                     <div style={{marginTop:4}}><span style={{color:'var(--muted)'}}>→</span> livestream.viewer_count, followers_count, .categories, .created_at</div>
                   </div>
                 </section>
